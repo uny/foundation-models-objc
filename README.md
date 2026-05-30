@@ -15,7 +15,7 @@ It is consumed by [`ondevice-llm`](https://github.com/uny/ondevice-llm) (a Kotli
 | | |
 |:--|:--|
 | Platform | iOS 26.0+ |
-| Toolchain | Swift 6.2 / Xcode 16.x |
+| Toolchain | Swift 6.2 / Xcode 26 |
 | Framework | `FoundationModels` (linked automatically) |
 | Hardware | Apple Intelligence-capable device (iPhone 15 Pro+ / M1+) |
 
@@ -60,7 +60,9 @@ Types mirror the Swift-only originals with an `AFM` (**A**pple **F**oundation **
 | `cancel()` | — | Cancel the in-flight generation (Foundation Models stops at the next token boundary). |
 | `close()` | — | Cancel and release the session's retained task. |
 
-Generation runs on a `Task` the session owns, so it can be cancelled from another thread; access to that task is guarded by an `NSLock` for cross-thread safety.
+Generation runs on a `Task` the session owns, so it can be cancelled from another thread; access to that task is guarded by an `OSAllocatedUnfairLock` for cross-thread safety.
+
+A session holds **one in-flight generation at a time**: starting a new `respond`/`streamResponse` cancels any previous one, which then completes with a `CancellationError`. A completion handler may therefore still fire after `cancel()`/`close()` (delivering that `CancellationError`), so callers should be prepared to ignore a completion on an already-cancelled call.
 
 ## License
 
