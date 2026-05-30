@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "OnDeviceLlmBridge",
+    name: "FoundationModelsObjC",
     platforms: [.iOS(.v26)],
     products: [
-        .library(name: "OnDeviceLlmBridge", type: .static, targets: ["OnDeviceLlmBridge"]),
+        .library(name: "FoundationModelsObjC", type: .static, targets: ["FoundationModelsObjC"]),
     ],
     targets: [
         .target(
-            name: "OnDeviceLlmBridge",
+            name: "FoundationModelsObjC",
             linkerSettings: [.linkedFramework("FoundationModels")]
         ),
     ]

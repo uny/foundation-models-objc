@@ -34,7 +34,7 @@ kotlin {
         swiftPackage(
             url = url("https://github.com/uny/foundation-models-objc.git"),
             version = exact("1.0.0"),
-            products = listOf(product("OnDeviceLlmBridge")),
+            products = listOf(product("FoundationModelsObjC")),
         )
     }
 }
@@ -42,18 +42,25 @@ kotlin {
 
 ## API surface
 
-`OnDeviceLlmBridge` is an `@objc` class backing a single `LanguageModelSession`:
+Types mirror the Swift-only originals with an `AFM` (**A**pple **F**oundation **M**odels) prefix, so the `@objc` surface reads like the standard API.
 
-| Method | Purpose |
-|:--|:--|
-| `static isAvailable() -> Bool` | Whether the on-device model is ready on this device. |
-| `createSession(_ instructions: String?)` | Start a session, optionally with system `Instructions`. |
-| `generate(_:temperature:maxTokens:completion:)` | Single-shot generation. A negative temperature / non-positive maxTokens means "use the model default". |
-| `streamGenerate(_:temperature:maxTokens:onPartial:completion:)` | Streaming generation. `onPartial` receives **cumulative** snapshots (callers diff for deltas). |
-| `cancel()` | Cancel the in-flight generation (Foundation Models stops at the next token boundary). |
-| `close()` | Cancel and release the session. |
+### `AFMSystemLanguageModel`
 
-Generation runs on a `Task` the bridge owns, so it can be cancelled from another thread; all session/task access is guarded by an `NSLock` for cross-thread safety.
+| Member | Mirrors | Purpose |
+|:--|:--|:--|
+| `static isAvailable() -> Bool` | `SystemLanguageModel.default.isAvailable` | Whether the on-device model is ready on this device. |
+
+### `AFMLanguageModelSession`
+
+| Member | Mirrors | Purpose |
+|:--|:--|:--|
+| `init(instructions: String?)` | `LanguageModelSession(instructions:)` | Start a session, optionally with system `Instructions`. |
+| `respond(to:temperature:maxTokens:completion:)` | `respond(to:options:)` | Single-shot generation. A negative temperature / non-positive maxTokens means "use the model default". |
+| `streamResponse(to:temperature:maxTokens:onPartial:completion:)` | `streamResponse(to:options:)` | Streaming generation. `onPartial` receives **cumulative** snapshots (callers diff for deltas). |
+| `cancel()` | — | Cancel the in-flight generation (Foundation Models stops at the next token boundary). |
+| `close()` | — | Cancel and release the session's retained task. |
+
+Generation runs on a `Task` the session owns, so it can be cancelled from another thread; access to that task is guarded by an `NSLock` for cross-thread safety.
 
 ## License
 
