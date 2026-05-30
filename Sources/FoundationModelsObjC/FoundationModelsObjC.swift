@@ -1,5 +1,6 @@
 import Foundation
 import FoundationModels
+import os
 
 /// `@objc` mirror of `FoundationModels.SystemLanguageModel`.
 ///
@@ -18,60 +19,53 @@ import FoundationModels
 /// streaming `AsyncSequence`) into completion-handler methods any non-Swift
 /// consumer can bind to. Method names follow the Swift original
 /// (`respond`, `streamResponse`).
-///
-/// All mutable state is guarded by `lock`, so the type is safe to drive from
-/// several threads at once (hence `@unchecked Sendable`); `final` keeps that
-/// guarantee from being broken by an unguarded subclass.
-@objc public final class AFMLanguageModelSession: NSObject, @unchecked Sendable {
+@objc public final class AFMLanguageModelSession: NSObject {
+    // The in-flight generation, retained so cancel()/close() can stop it, plus a monotonic
+    // id of the generation currently held. Foundation Models honors Task cancellation
+    // (respond/streamResponse throw CancellationError), so cancelling frees the device
+    // instead of running an abandoned generation to completion. Manual completion handlers
+    // (rather than `async throws`) let us own this Task and cancel it from outside the
+    // calling coroutine.
+    private struct State {
+        var task: Task<Void, Never>?
+        var generation: UInt64 = 0
+    }
+
     private let session: LanguageModelSession
 
-    // The in-flight generation, retained so cancel()/close() can stop it. Foundation
-    // Models honors Task cancellation (respond/streamResponse throw CancellationError),
-    // so cancelling frees the device instead of running an abandoned generation to
-    // completion. Manual completion handlers (rather than `async throws`) are used so we
-    // own this Task and can cancel it from outside the calling coroutine.
-    private var task: Task<Void, Never>?
-
-    // Monotonic id of the generation currently held in `task`. A finishing task only
-    // clears `task` when its id still matches, so a generation that was already replaced
-    // by a newer one (or by close()) can never clear the live task.
-    private var generation: UInt64 = 0
-
-    // task/generation are written from the calling thread (respond/streamResponse) and
-    // read/cleared from other threads via cancel()/close() and each task's own completion
-    // — a Kotlin coroutine's cancellation handler runs off-thread. Guard every access so
-    // the cross-thread reads/writes are not a race.
-    private let lock = NSLock()
-
-    private func withLock<T>(_ body: () -> T) -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return body()
-    }
+    // State is written from the calling thread (respond/streamResponse) and read/cleared
+    // from other threads via cancel()/close() and each task's own completion — a Kotlin
+    // coroutine's cancellation handler runs off-thread. The lock serializes every access
+    // so the cross-thread reads/writes are not a race. OSAllocatedUnfairLock is Sendable
+    // and shares its storage across copies, so the completion task clears its slot by
+    // capturing `lock` rather than `self` — which keeps this type honestly thread-safe
+    // without an `@unchecked Sendable` escape hatch.
+    private let lock = OSAllocatedUnfairLock(initialState: State())
 
     /// Cancels any previous generation and installs `work` as the session's single
-    /// in-flight task. Cancelling the old task, bumping the generation, creating the Task
-    /// and storing it all happen under one `lock` acquisition, so a concurrent
-    /// cancel()/close() can never observe a half-installed task: it sees either the old
-    /// generation or the new one, never the gap between creating and storing it. The task
-    /// clears itself on completion (only while it is still current), so cancel() acts only
-    /// on a genuinely running generation and the captured handlers are released promptly.
+    /// in-flight task. Reading the previous task, bumping the generation, creating the new
+    /// Task and storing it all happen under one lock acquisition, so a concurrent
+    /// cancel()/close() never observes a half-installed task — it sees the old generation
+    /// or the new one, never the gap between creating and storing it. The previous task is
+    /// cancelled *outside* the lock, because a cancellation handler can run arbitrary work
+    /// and must not run under an unfair lock. The task clears itself on completion, but
+    /// only while it is still the current generation, so a replaced task can't clear a
+    /// live one.
     private func start(_ work: @escaping @Sendable () async -> Void) {
-        withLock {
-            task?.cancel()
-            generation &+= 1
-            let id = generation
-            task = Task { [weak self] in
+        // Bind the shared lock to a local (its storage is shared across copies) so the
+        // completion task captures `lock` by value instead of `self`.
+        let lock = self.lock
+        let previous = lock.withLock { state -> Task<Void, Never>? in
+            let previous = state.task
+            state.generation &+= 1
+            let id = state.generation
+            state.task = Task {
                 await work()
-                self?.clearTask(id)
+                lock.withLock { if $0.generation == id { $0.task = nil } }
             }
+            return previous
         }
-    }
-
-    private func clearTask(_ id: UInt64) {
-        withLock {
-            if generation == id { task = nil }
-        }
+        previous?.cancel()
     }
 
     /// Mirrors `LanguageModelSession(instructions:)`. A nil [instructions] starts a
@@ -135,18 +129,20 @@ import FoundationModels
     /// boundary and the pending respond()/streamResponse() completes with a
     /// CancellationError, which the caller discards on an already-cancelled call.
     @objc public func cancel() {
-        withLock { task }?.cancel()
+        lock.withLock { $0.task }?.cancel()
     }
 
     /// Cancels any in-flight generation and releases the session's retained Task. Bumping
-    /// the generation invalidates that task's pending self-clear, so it cannot race a
-    /// later start().
+    /// the generation invalidates that task's pending self-clear so it can't race a later
+    /// start(); the cancel runs outside the lock for the same reason as in start().
     @objc public func close() {
-        withLock {
-            task?.cancel()
-            task = nil
-            generation &+= 1
+        let task = lock.withLock { state -> Task<Void, Never>? in
+            let task = state.task
+            state.task = nil
+            state.generation &+= 1
+            return task
         }
+        task?.cancel()
     }
 
     // Kotlin cannot pass optional primitives across the @objc boundary, so a
