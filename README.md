@@ -49,17 +49,42 @@ Types mirror the Swift-only originals with an `AFM` (**A**pple **F**oundation **
 | Member | Mirrors | Purpose |
 |:--|:--|:--|
 | `static isAvailable() -> Bool` | `SystemLanguageModel.default.isAvailable` | Whether the on-device model is ready on this device. |
+| `static availability() -> AFMModelAvailability` | `SystemLanguageModel.default.availability` | Availability with the **reason** when unavailable (`deviceNotEligible` / `appleIntelligenceNotEnabled` / `modelNotReady`). |
+| `static supportedLanguageIdentifiers() -> [String]` | `supportedLanguages` | BCP-47 identifiers of the languages the model supports. |
+| `static supportsLocale(_:) -> Bool` | `supportsLocale(_:)` | Whether a given BCP-47 locale identifier (e.g. `"en-US"`) is supported. |
 
 ### `AFMLanguageModelSession`
 
 | Member | Mirrors | Purpose |
 |:--|:--|:--|
 | `init(instructions: String?)` | `LanguageModelSession(instructions:)` | Start a session, optionally with system `Instructions`. |
+| `init(useCase:permissiveGuardrails:instructions:)` | `LanguageModelSession(model:instructions:)` | Start a session on a model specialized for a `UseCase` (`.general` / `.contentTagging`), optionally with permissive guardrails. |
+| `var isResponding: Bool` | `LanguageModelSession.isResponding` | Whether a generation is currently in flight. |
 | `prewarm()` | `LanguageModelSession.prewarm()` | Preload the model to avoid first-generation cold-start latency. Best-effort, safe to call repeatedly. |
+| `prewarm(promptPrefix:)` | `LanguageModelSession.prewarm(promptPrefix:)` | Preload and also cache a prompt prefix so a follow-up generation starting with it is faster. |
 | `respond(to:temperature:maxTokens:completion:)` | `respond(to:options:)` | Single-shot generation. A negative temperature / non-positive maxTokens means "use the model default". |
+| `respond(to:options:completion:)` | `respond(to:options:)` | Single-shot generation with full `AFMGenerationOptions` (temperature, token cap, sampling). |
 | `streamResponse(to:temperature:maxTokens:onPartial:completion:)` | `streamResponse(to:options:)` | Streaming generation. `onPartial` receives **cumulative** snapshots (callers diff for deltas). |
+| `streamResponse(to:options:onPartial:completion:)` | `streamResponse(to:options:)` | Streaming generation with full `AFMGenerationOptions`. |
 | `cancel()` | — | Cancel the in-flight generation (Foundation Models stops at the next token boundary). |
 | `close()` | — | Cancel and release the session's retained task. |
+
+### `AFMGenerationOptions`
+
+Mirror of `GenerationOptions`, passed to the `respond(to:options:)` / `streamResponse(to:options:)` overloads. Sentinel defaults mean "use the model default" the same way the primitive overloads do.
+
+| Property | Mirrors | Notes |
+|:--|:--|:--|
+| `temperature: Double` | `temperature` | Negative → model default. |
+| `maximumResponseTokens: Int` | `maximumResponseTokens` | Non-positive → model default. |
+| `samplingMode: AFMSamplingMode` | `sampling` | `.default` (unset) / `.greedy` / `.topK` / `.nucleus`. |
+| `samplingTopK: Int` | `.random(top:seed:)` | Candidate count for `.topK`. |
+| `samplingProbabilityThreshold: Double` | `.random(probabilityThreshold:seed:)` | Probability mass for `.nucleus`. |
+| `samplingSeed: Int64` | `seed:` | Reproducible sampling; negative → no fixed seed. |
+
+### Errors
+
+`respond` / `streamResponse` deliver failures as `NSError` in the `AFMLanguageModelSession.errorDomain` domain. The `code` is an `AFMGenerationErrorCode` (e.g. `exceededContextWindowSize`, `guardrailViolation`, `rateLimited`, `cancelled`) mapped from `LanguageModelSession.GenerationError`, so non-Swift consumers can branch on the cause. The original framework error is preserved under `NSUnderlyingErrorKey`.
 
 Generation runs on a `Task` the session owns, so it can be cancelled from another thread; access to that task is guarded by an `OSAllocatedUnfairLock` for cross-thread safety.
 
