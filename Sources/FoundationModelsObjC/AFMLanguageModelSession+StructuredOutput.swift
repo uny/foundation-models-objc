@@ -8,6 +8,22 @@ import FoundationModels
 /// desired shape (see `AFMSchemaBuilder` for the supported subset) and receive the model's
 /// output as a **JSON string** (`GeneratedContent.jsonString`).
 extension AFMLanguageModelSession {
+    /// Builds the output schema, or delivers the malformed-schema `NSError` via [onError]
+    /// (whose shape differs between the two entry points) and returns nil so the caller can
+    /// bail before starting any generation. Centralizes the shared `rootName: "Output"` and
+    /// the schema-build do/catch used by both `respond` and `streamResponse`.
+    private func outputSchema(
+        fromJSONSchema jsonSchema: String,
+        onError: (NSError) -> Void
+    ) -> GenerationSchema? {
+        do {
+            return try AFMSchemaBuilder.generationSchema(fromJSONSchema: jsonSchema, rootName: "Output")
+        } catch {
+            onError(error as NSError)
+            return nil
+        }
+    }
+
     /// Single-shot structured generation. [jsonSchema] is the desired output shape;
     /// [includeSchemaInPrompt] mirrors the framework flag (set false when the schema is
     /// already described in the instructions). The completion delivers a JSON string on
@@ -20,11 +36,7 @@ extension AFMLanguageModelSession {
         options: AFMGenerationOptions,
         completion: @escaping @Sendable (String?, Error?) -> Void
     ) {
-        let schema: GenerationSchema
-        do {
-            schema = try AFMSchemaBuilder.generationSchema(fromJSONSchema: jsonSchema, rootName: "Output")
-        } catch {
-            completion(nil, error as NSError)
+        guard let schema = outputSchema(fromJSONSchema: jsonSchema, onError: { completion(nil, $0) }) else {
             return
         }
         let session = self.session
@@ -56,11 +68,7 @@ extension AFMLanguageModelSession {
         onPartial: @escaping @Sendable (String) -> Void,
         completion: @escaping @Sendable (Error?) -> Void
     ) {
-        let schema: GenerationSchema
-        do {
-            schema = try AFMSchemaBuilder.generationSchema(fromJSONSchema: jsonSchema, rootName: "Output")
-        } catch {
-            completion(error as NSError)
+        guard let schema = outputSchema(fromJSONSchema: jsonSchema, onError: completion) else {
             return
         }
         let session = self.session
