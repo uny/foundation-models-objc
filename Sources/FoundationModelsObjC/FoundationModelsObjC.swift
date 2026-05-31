@@ -73,10 +73,10 @@ import os
     @objc public var samplingMode: AFMSamplingMode = .default
     /// Number of candidate tokens for `.topK`. Must be >= 1; an unset/invalid value
     /// (< 1) falls back to the model's default sampling rather than silently
-    /// collapsing to greedy (top-1).
+    /// collapsing to greedy (top-1). The fallback is logged (see `resolved()`).
     @objc public var samplingTopK: Int = 0
     /// Probability mass for `.nucleus`, in (0, 1]. An unset/out-of-range value falls
-    /// back to the model's default sampling.
+    /// back to the model's default sampling. The fallback is logged.
     @objc public var samplingProbabilityThreshold: Double = 0
     /// Seed for reproducible sampling; negative → no fixed seed.
     @objc public var samplingSeed: Int64 = -1
@@ -95,8 +95,51 @@ import os
     }
 
     // UInt64? form of samplingSeed for GenerationOptions.SamplingMode (negative → nil).
-    fileprivate var seedValue: UInt64? {
+    private var seedValue: UInt64? {
         samplingSeed >= 0 ? UInt64(samplingSeed) : nil
+    }
+
+    // Diagnostics for caller-side option mistakes that are intentionally tolerated
+    // (e.g. a sampling mode requested without its companion field). resolved() can't
+    // throw across the synchronous @objc boundary, so a silently-ignored request is
+    // logged instead of failing — otherwise it's an undebuggable "my top-k/seed had no
+    // effect" downstream.
+    private static let log = Logger(subsystem: "FoundationModelsObjC", category: "AFMGenerationOptions")
+
+    // Translates this @objc options object into the framework type, applying the
+    // sentinel-means-default convention (Kotlin cannot pass optional primitives across
+    // the @objc boundary, so a negative temperature / non-positive maxTokens encodes
+    // "unset" → use the Foundation Models default) and mapping the sampling enum to
+    // SamplingMode. A mode whose required companion field is unset/out-of-range falls
+    // back to the model's default sampling rather than passing an invalid value or
+    // silently degenerating to greedy.
+    func resolved() -> GenerationOptions {
+        let sampling: GenerationOptions.SamplingMode?
+        switch samplingMode {
+        case .default:
+            sampling = nil
+        case .greedy:
+            sampling = .greedy
+        case .topK:
+            if samplingTopK >= 1 {
+                sampling = .random(top: samplingTopK, seed: seedValue)
+            } else {
+                Self.log.error("samplingMode .topK ignored: samplingTopK (\(self.samplingTopK)) must be >= 1; using model default sampling")
+                sampling = nil
+            }
+        case .nucleus:
+            if samplingProbabilityThreshold > 0 && samplingProbabilityThreshold <= 1 {
+                sampling = .random(probabilityThreshold: samplingProbabilityThreshold, seed: seedValue)
+            } else {
+                Self.log.error("samplingMode .nucleus ignored: samplingProbabilityThreshold (\(self.samplingProbabilityThreshold)) must be in (0, 1]; using model default sampling")
+                sampling = nil
+            }
+        }
+        return GenerationOptions(
+            sampling: sampling,
+            temperature: temperature >= 0 ? temperature : nil,
+            maximumResponseTokens: maximumResponseTokens > 0 ? maximumResponseTokens : nil
+        )
     }
 }
 
@@ -116,17 +159,11 @@ import os
     /// reason survives the `@objc` boundary.
     @objc public static func availability() -> AFMModelAvailability {
         switch SystemLanguageModel.default.availability {
-        case .available:
-            return .available
-        case .unavailable(let reason):
-            switch reason {
-            case .deviceNotEligible: return .unavailableDeviceNotEligible
-            case .appleIntelligenceNotEnabled: return .unavailableAppleIntelligenceNotEnabled
-            case .modelNotReady: return .unavailableModelNotReady
-            @unknown default: return .unavailableUnknown
-            }
-        @unknown default:
-            return .unavailableUnknown
+        case .available: return .available
+        case .unavailable(.deviceNotEligible): return .unavailableDeviceNotEligible
+        case .unavailable(.appleIntelligenceNotEnabled): return .unavailableAppleIntelligenceNotEnabled
+        case .unavailable(.modelNotReady): return .unavailableModelNotReady
+        @unknown default: return .unavailableUnknown
         }
     }
 
@@ -282,7 +319,7 @@ import os
         options: AFMGenerationOptions,
         completion: @escaping @Sendable (String?, Error?) -> Void
     ) {
-        respond(to: prompt, options: Self.options(from: options), completion: completion)
+        respond(to: prompt, options: options.resolved(), completion: completion)
     }
 
     private func respond(
@@ -322,7 +359,7 @@ import os
         onPartial: @escaping @Sendable (String) -> Void,
         completion: @escaping @Sendable (Error?) -> Void
     ) {
-        streamResponse(to: prompt, options: Self.options(from: options), onPartial: onPartial, completion: completion)
+        streamResponse(to: prompt, options: options.resolved(), onPartial: onPartial, completion: completion)
     }
 
     private func streamResponse(
@@ -364,37 +401,6 @@ import os
             return task
         }
         task?.cancel()
-    }
-
-    // Translates the @objc options object into the framework type, applying the
-    // sentinel-means-default convention (Kotlin cannot pass optional primitives across
-    // the @objc boundary, so a negative temperature / non-positive maxTokens encodes
-    // "unset" → use the Foundation Models default) and mapping the sampling enum to
-    // SamplingMode. A mode whose required companion field is unset/out-of-range falls
-    // back to the model's default sampling rather than passing an invalid value or
-    // silently degenerating to greedy.
-    private static func options(from options: AFMGenerationOptions) -> GenerationOptions {
-        let sampling: GenerationOptions.SamplingMode?
-        switch options.samplingMode {
-        case .default:
-            sampling = nil
-        case .greedy:
-            sampling = .greedy
-        case .topK:
-            sampling = options.samplingTopK >= 1
-                ? .random(top: options.samplingTopK, seed: options.seedValue)
-                : nil
-        case .nucleus:
-            let threshold = options.samplingProbabilityThreshold
-            sampling = (threshold > 0 && threshold <= 1)
-                ? .random(probabilityThreshold: threshold, seed: options.seedValue)
-                : nil
-        }
-        return GenerationOptions(
-            sampling: sampling,
-            temperature: options.temperature >= 0 ? options.temperature : nil,
-            maximumResponseTokens: options.maximumResponseTokens > 0 ? options.maximumResponseTokens : nil
-        )
     }
 
     // Maps framework errors to a stable NSError (AFMGenerationErrorCode) so Kotlin can
