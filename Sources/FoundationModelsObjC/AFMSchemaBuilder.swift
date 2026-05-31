@@ -81,6 +81,16 @@ enum AFMSchemaBuilder {
     }
 
     private static func dynamicSchema(from node: [String: Any], name: String) throws -> DynamicGenerationSchema {
+        // `description` is read for every node, but the framework only lets us attach one to
+        // objects (`init(name:description:properties:)`) and enums (`init(name:description:anyOf:)`).
+        // The primitive (`init(type:)`) and array (`init(arrayOf:…)`) initializers take no
+        // description, so a `description` placed directly on a bare scalar or array node is
+        // dropped here. It still survives whenever such a node is an *object property*, because
+        // `DynamicGenerationSchema.Property` carries the description independently (see the
+        // `object` case below) — and real schemas are almost always a root object of properties.
+        // Wrapping a scalar in a single-element `anyOf` just to carry a description is avoided
+        // deliberately: it would change the schema's meaning from "a string" to "a union of one
+        // string". This is a FoundationModels limitation, not an oversight.
         let description = node["description"] as? String
         let type = node["type"] as? String
 

@@ -99,11 +99,11 @@ A session holds **one in-flight generation at a time**: starting a new `respond`
 
 The Swift-only `@Generable` macro can't cross the `@objc` boundary, so structured (guided) generation is driven by a **JSON Schema** string and returns the model's output as a **JSON string** (`GeneratedContent.jsonString`):
 
-```
+```swift
 respond(to: "Extract the contact", jsonSchema: schema, includeSchemaInPrompt: true, options: opts) { json, error in ... }
 ```
 
-The supported JSON Schema subset (built by `AFMSchemaBuilder`): `object` (`properties`, `required`), `array` (`items`, `minItems`/`maxItems`), `string` (with optional `enum`), `integer`, `number`, `boolean`, and `description` on any node. Nested schemas are inlined (no `$ref`). A malformed schema fails with an `NSError` in `AFMSchemaErrorDomain`, distinct from generation failures.
+The supported JSON Schema subset (built by `AFMSchemaBuilder`): `object` (`properties`, `required`), `array` (`items`, `minItems`/`maxItems`), `string` (with optional `enum`), `integer`, `number`, `boolean`, and `description` (honored on objects, enums, and every object property regardless of its type; the framework's primitive and array schemas can't carry one, so a `description` placed directly on a bare scalar or array node — e.g. the root or an array's items — is dropped). Nested schemas are inlined (no `$ref`). A malformed schema fails with an `NSError` in `AFMSchemaErrorDomain`, distinct from generation failures.
 
 ## Tool calling
 
@@ -115,7 +115,7 @@ Give the model tools it can call mid-generation. Implement `AFMToolHandler` (one
 | `AFMTool` | Declares one tool: `name`, `description`, `parametersJSONSchema`, `includesSchemaInInstructions`, `handler`. Set `includesSchemaInInstructions` false to skip re-injecting the parameter schema when it is already described in the instructions (the tool-side analogue of `includeSchemaInPrompt`). |
 | `init(tools:instructions:)` | Starts a session whose model can call the tools. Throws if a tool's schema is malformed. |
 
-The bridge maps each tool's arguments to a JSON string and the handler's return value back to the model, so no `@Generable` argument type is needed.
+The bridge maps each tool's arguments to a JSON string and the handler's return value to the model, so no `@Generable` argument type is needed.
 
 ## Transcript (history)
 
