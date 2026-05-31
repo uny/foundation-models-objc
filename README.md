@@ -78,8 +78,8 @@ Mirror of `GenerationOptions`, passed to the `respond(to:options:)` / `streamRes
 | `temperature: Double` | `temperature` | Negative → model default. |
 | `maximumResponseTokens: Int` | `maximumResponseTokens` | Non-positive → model default. |
 | `samplingMode: AFMSamplingMode` | `sampling` | `.default` (unset) / `.greedy` / `.topK` / `.nucleus`. |
-| `samplingTopK: Int` | `.random(top:seed:)` | Candidate count for `.topK`. |
-| `samplingProbabilityThreshold: Double` | `.random(probabilityThreshold:seed:)` | Probability mass for `.nucleus`. |
+| `samplingTopK: Int` | `.random(top:seed:)` | Candidate count for `.topK`. Must be ≥ 1; unset/invalid → model default sampling. |
+| `samplingProbabilityThreshold: Double` | `.random(probabilityThreshold:seed:)` | Probability mass for `.nucleus`, in (0, 1]; unset/out-of-range → model default sampling. |
 | `samplingSeed: Int64` | `seed:` | Reproducible sampling; negative → no fixed seed. |
 
 ### Errors
@@ -88,7 +88,7 @@ Mirror of `GenerationOptions`, passed to the `respond(to:options:)` / `streamRes
 
 Generation runs on a `Task` the session owns, so it can be cancelled from another thread; access to that task is guarded by an `OSAllocatedUnfairLock` for cross-thread safety.
 
-A session holds **one in-flight generation at a time**: starting a new `respond`/`streamResponse` cancels any previous one, which then completes with a `CancellationError`. A completion handler may therefore still fire after `cancel()`/`close()` (delivering that `CancellationError`), so callers should be prepared to ignore a completion on an already-cancelled call.
+A session holds **one in-flight generation at a time**: starting a new `respond`/`streamResponse` cancels any previous one, which then completes with an error whose code is `AFMGenerationErrorCode.cancelled` (the underlying `CancellationError` is preserved under `NSUnderlyingErrorKey`). A completion handler may therefore still fire after `cancel()`/`close()` (delivering that `cancelled` error), so callers should be prepared to ignore a completion on an already-cancelled call.
 
 ## License
 

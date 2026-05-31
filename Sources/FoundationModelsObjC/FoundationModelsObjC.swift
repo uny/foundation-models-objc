@@ -71,15 +71,27 @@ import os
     /// Non-positive → use the model default.
     @objc public var maximumResponseTokens: Int = 0
     @objc public var samplingMode: AFMSamplingMode = .default
-    /// Number of candidate tokens for `.topK`. Clamped to at least 1.
+    /// Number of candidate tokens for `.topK`. Must be >= 1; an unset/invalid value
+    /// (< 1) falls back to the model's default sampling rather than silently
+    /// collapsing to greedy (top-1).
     @objc public var samplingTopK: Int = 0
-    /// Probability mass for `.nucleus`, in (0, 1].
+    /// Probability mass for `.nucleus`, in (0, 1]. An unset/out-of-range value falls
+    /// back to the model's default sampling.
     @objc public var samplingProbabilityThreshold: Double = 0
     /// Seed for reproducible sampling; negative → no fixed seed.
     @objc public var samplingSeed: Int64 = -1
 
     @objc public override init() {
         super.init()
+    }
+
+    // Primitive-overload form: the respond(to:temperature:maxTokens:) family builds an
+    // options object so the sentinel-means-default convention lives in one place
+    // (options(from:)). A negative temperature / non-positive maxTokens stays "unset".
+    fileprivate convenience init(temperature: Double, maxTokens: Int32) {
+        self.init()
+        self.temperature = temperature
+        self.maximumResponseTokens = Int(maxTokens)
     }
 
     // UInt64? form of samplingSeed for GenerationOptions.SamplingMode (negative → nil).
@@ -194,13 +206,7 @@ import os
     /// Mirrors `LanguageModelSession(instructions:)`. A nil [instructions] starts a
     /// session without system `Instructions`.
     @objc public init(instructions: String?) {
-        if let instructions {
-            session = LanguageModelSession {
-                Instructions(instructions)
-            }
-        } else {
-            session = LanguageModelSession()
-        }
+        session = Self.makeSession(model: .default, instructions: instructions)
         super.init()
     }
 
@@ -212,14 +218,22 @@ import os
         let modelUseCase: SystemLanguageModel.UseCase = useCase == .contentTagging ? .contentTagging : .general
         let guardrails: SystemLanguageModel.Guardrails = permissiveGuardrails ? .permissiveContentTransformations : .default
         let model = SystemLanguageModel(useCase: modelUseCase, guardrails: guardrails)
+        session = Self.makeSession(model: model, instructions: instructions)
+        super.init()
+    }
+
+    // Single construction path for both inits: only the model differs (the default model
+    // vs. a UseCase/guardrails-specialized one), so the Instructions-or-not branch lives
+    // in one place. `LanguageModelSession(model:)` with `.default` is equivalent to the
+    // no-model initializer.
+    private static func makeSession(model: SystemLanguageModel, instructions: String?) -> LanguageModelSession {
         if let instructions {
-            session = LanguageModelSession(model: model) {
+            return LanguageModelSession(model: model) {
                 Instructions(instructions)
             }
         } else {
-            session = LanguageModelSession(model: model)
+            return LanguageModelSession(model: model)
         }
-        super.init()
     }
 
     /// Mirrors `LanguageModelSession.isResponding` — whether a generation is currently in
@@ -258,7 +272,7 @@ import os
         maxTokens: Int32,
         completion: @escaping @Sendable (String?, Error?) -> Void
     ) {
-        respond(to: prompt, options: Self.options(temperature: temperature, maxTokens: maxTokens), completion: completion)
+        respond(to: prompt, options: AFMGenerationOptions(temperature: temperature, maxTokens: maxTokens), completion: completion)
     }
 
     /// Mirrors `respond(to:options:)` with the full `AFMGenerationOptions` (temperature,
@@ -296,7 +310,7 @@ import os
         onPartial: @escaping @Sendable (String) -> Void,
         completion: @escaping @Sendable (Error?) -> Void
     ) {
-        streamResponse(to: prompt, options: Self.options(temperature: temperature, maxTokens: maxTokens), onPartial: onPartial, completion: completion)
+        streamResponse(to: prompt, options: AFMGenerationOptions(temperature: temperature, maxTokens: maxTokens), onPartial: onPartial, completion: completion)
     }
 
     /// Mirrors `streamResponse(to:options:)` with the full `AFMGenerationOptions`.
@@ -332,8 +346,9 @@ import os
     }
 
     /// Cancels the in-flight generation. Foundation Models stops at the next token
-    /// boundary and the pending respond()/streamResponse() completes with a
-    /// CancellationError, which the caller discards on an already-cancelled call.
+    /// boundary and the pending respond()/streamResponse() completes with an NSError in
+    /// errorDomain whose code is AFMGenerationErrorCode.cancelled, which the caller
+    /// discards on an already-cancelled call.
     @objc public func cancel() {
         lock.withLock { $0.task }?.cancel()
     }
@@ -351,18 +366,13 @@ import os
         task?.cancel()
     }
 
-    // Kotlin cannot pass optional primitives across the @objc boundary, so a
-    // negative temperature / non-positive maxTokens encodes "unset" → use the
-    // Foundation Models default for that field.
-    private static func options(temperature: Double, maxTokens: Int32) -> GenerationOptions {
-        GenerationOptions(
-            temperature: temperature >= 0 ? temperature : nil,
-            maximumResponseTokens: maxTokens > 0 ? Int(maxTokens) : nil
-        )
-    }
-
-    // Translates the @objc options object into the framework type, applying the same
-    // sentinel-means-default convention and mapping the sampling enum to SamplingMode.
+    // Translates the @objc options object into the framework type, applying the
+    // sentinel-means-default convention (Kotlin cannot pass optional primitives across
+    // the @objc boundary, so a negative temperature / non-positive maxTokens encodes
+    // "unset" → use the Foundation Models default) and mapping the sampling enum to
+    // SamplingMode. A mode whose required companion field is unset/out-of-range falls
+    // back to the model's default sampling rather than passing an invalid value or
+    // silently degenerating to greedy.
     private static func options(from options: AFMGenerationOptions) -> GenerationOptions {
         let sampling: GenerationOptions.SamplingMode?
         switch options.samplingMode {
@@ -371,9 +381,14 @@ import os
         case .greedy:
             sampling = .greedy
         case .topK:
-            sampling = .random(top: max(1, options.samplingTopK), seed: options.seedValue)
+            sampling = options.samplingTopK >= 1
+                ? .random(top: options.samplingTopK, seed: options.seedValue)
+                : nil
         case .nucleus:
-            sampling = .random(probabilityThreshold: options.samplingProbabilityThreshold, seed: options.seedValue)
+            let threshold = options.samplingProbabilityThreshold
+            sampling = (threshold > 0 && threshold <= 1)
+                ? .random(probabilityThreshold: threshold, seed: options.seedValue)
+                : nil
         }
         return GenerationOptions(
             sampling: sampling,
