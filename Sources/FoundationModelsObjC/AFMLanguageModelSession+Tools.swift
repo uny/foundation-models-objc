@@ -82,6 +82,14 @@ struct AFMBridgedTool: Tool, @unchecked Sendable {
         // the session (cancel()/close()) now unsticks it. The lock holds a non-Sendable
         // continuation, hence `uncheckedState`.
         let slot = OSAllocatedUnfairLock<CheckedContinuation<String, Error>?>(uncheckedState: nil)
+        // Atomically take the continuation out of the slot (clearing it), so the handler's
+        // completion and onCancel race for it and only the first taker gets a non-nil value.
+        @Sendable func takeContinuation() -> CheckedContinuation<String, Error>? {
+            slot.withLock { stored in
+                defer { stored = nil }
+                return stored
+            }
+        }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
                 let cancelledBeforeStore = slot.withLock { stored -> Bool in
@@ -96,11 +104,7 @@ struct AFMBridgedTool: Tool, @unchecked Sendable {
                     return
                 }
                 handler.call(argumentsJSON: argumentsJSON) { result, error in
-                    let continuation = slot.withLock { stored -> CheckedContinuation<String, Error>? in
-                        defer { stored = nil }
-                        return stored
-                    }
-                    guard let continuation else { return }
+                    guard let continuation = takeContinuation() else { return }
                     if let error {
                         continuation.resume(throwing: error)
                     } else {
@@ -109,11 +113,7 @@ struct AFMBridgedTool: Tool, @unchecked Sendable {
                 }
             }
         } onCancel: {
-            let continuation = slot.withLock { stored -> CheckedContinuation<String, Error>? in
-                defer { stored = nil }
-                return stored
-            }
-            continuation?.resume(throwing: CancellationError())
+            takeContinuation()?.resume(throwing: CancellationError())
         }
     }
 }
