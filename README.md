@@ -111,8 +111,8 @@ Give the model tools it can call mid-generation. Implement `AFMToolHandler` (one
 
 | Type | Purpose |
 |:--|:--|
-| `AFMToolHandler` (protocol) | Your implementation. The framework calls `call(argumentsJSON:completion:)` off the main actor when the model invokes the tool; call `completion` exactly once with the result string (fed back to the model) or an error. |
-| `AFMTool` | Declares one tool: `name`, `description`, `parametersJSONSchema`, `handler`. |
+| `AFMToolHandler` (protocol) | Your implementation. The framework calls `call(argumentsJSON:completion:)` off the main actor when the model invokes the tool; call `completion` exactly once with the result string (fed back to the model) or an error. A handler that never completes is unblocked only by cancelling the session (`cancel()`/`close()`). |
+| `AFMTool` | Declares one tool: `name`, `description`, `parametersJSONSchema`, `includesSchemaInInstructions`, `handler`. Set `includesSchemaInInstructions` false to skip re-injecting the parameter schema when it is already described in the instructions (the tool-side analogue of `includeSchemaInPrompt`). |
 | `init(tools:instructions:)` | Starts a session whose model can call the tools. Throws if a tool's schema is malformed. |
 
 The bridge maps each tool's arguments to a JSON string and the handler's return value back to the model, so no `@Generable` argument type is needed.

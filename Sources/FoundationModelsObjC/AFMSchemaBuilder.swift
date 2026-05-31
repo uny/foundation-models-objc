@@ -10,6 +10,9 @@ enum AFMSchemaError: Error, CustomNSError {
     case notAnObject
     case unsupportedType(type: String, at: String)
     case arrayMissingItems(at: String)
+    case invalidEnum(at: String)
+    case invalidProperty(key: String, at: String)
+    case invalidArrayBounds(at: String)
 
     static var errorDomain: String { "AFMSchemaErrorDomain" }
 
@@ -19,6 +22,9 @@ enum AFMSchemaError: Error, CustomNSError {
         case .notAnObject: return 2
         case .unsupportedType: return 3
         case .arrayMissingItems: return 4
+        case .invalidEnum: return 5
+        case .invalidProperty: return 6
+        case .invalidArrayBounds: return 7
         }
     }
 
@@ -33,6 +39,12 @@ enum AFMSchemaError: Error, CustomNSError {
             message = "Unsupported schema type '\(type)' at '\(path)'."
         case .arrayMissingItems(let path):
             message = "Array schema at '\(path)' is missing an 'items' definition."
+        case .invalidEnum(let path):
+            message = "The 'enum' at '\(path)' must be a non-empty array of strings."
+        case .invalidProperty(let key, let path):
+            message = "Property '\(key)' at '\(path)' must be a JSON object describing its schema."
+        case .invalidArrayBounds(let path):
+            message = "Array schema at '\(path)' has invalid 'minItems'/'maxItems' (each must be a non-negative integer with minItems <= maxItems)."
         }
         return [NSLocalizedDescriptionKey: message]
     }
@@ -78,8 +90,13 @@ enum AFMSchemaBuilder {
             let required = Set(node["required"] as? [String] ?? [])
             // Sort keys so the generated schema is stable across runs (JSONSerialization
             // does not preserve object key order).
-            let properties: [DynamicGenerationSchema.Property] = try rawProperties.keys.sorted().compactMap { key in
-                guard let child = rawProperties[key] as? [String: Any] else { return nil }
+            let properties: [DynamicGenerationSchema.Property] = try rawProperties.keys.sorted().map { key in
+                // A property whose value isn't a schema object can't be represented. Fail
+                // loudly instead of dropping it — silently omitting a `required` key would
+                // hand the model a schema missing a field the caller demanded.
+                guard let child = rawProperties[key] as? [String: Any] else {
+                    throw AFMSchemaError.invalidProperty(key: key, at: name)
+                }
                 let childSchema = try dynamicSchema(from: child, name: "\(name).\(key)")
                 return DynamicGenerationSchema.Property(
                     name: key,
@@ -94,15 +111,27 @@ enum AFMSchemaBuilder {
             guard let items = node["items"] as? [String: Any] else {
                 throw AFMSchemaError.arrayMissingItems(at: name)
             }
+            let minItems = try intBound(node, "minItems", at: name)
+            let maxItems = try intBound(node, "maxItems", at: name)
+            if let minItems, let maxItems, minItems > maxItems {
+                throw AFMSchemaError.invalidArrayBounds(at: name)
+            }
             let itemSchema = try dynamicSchema(from: items, name: "\(name).item")
             return DynamicGenerationSchema(
                 arrayOf: itemSchema,
-                minimumElements: node["minItems"] as? Int,
-                maximumElements: node["maxItems"] as? Int
+                minimumElements: minItems,
+                maximumElements: maxItems
             )
 
         case "string":
-            if let cases = node["enum"] as? [String] {
+            if let rawEnum = node["enum"] {
+                // The subset supports `enum` only as a non-empty list of strings. Anything
+                // else (mixed types, or an empty list that yields an unsatisfiable `anyOf`)
+                // can't be turned into a valid choice set, so reject it rather than silently
+                // degrading to an unconstrained string.
+                guard let cases = rawEnum as? [String], !cases.isEmpty else {
+                    throw AFMSchemaError.invalidEnum(at: name)
+                }
                 return DynamicGenerationSchema(name: name, description: description, anyOf: cases)
             }
             return DynamicGenerationSchema(type: String.self)
@@ -119,5 +148,16 @@ enum AFMSchemaBuilder {
         default:
             throw AFMSchemaError.unsupportedType(type: type ?? "<missing>", at: name)
         }
+    }
+
+    /// Reads a non-negative integer array bound (`minItems` / `maxItems`). Absent → nil;
+    /// present but not a non-negative integer (e.g. a float or a negative value) → throws,
+    /// so a malformed bound is rejected up front instead of being silently ignored.
+    private static func intBound(_ node: [String: Any], _ key: String, at name: String) throws -> Int? {
+        guard let raw = node[key] else { return nil }
+        guard let value = raw as? Int, value >= 0 else {
+            throw AFMSchemaError.invalidArrayBounds(at: name)
+        }
+        return value
     }
 }

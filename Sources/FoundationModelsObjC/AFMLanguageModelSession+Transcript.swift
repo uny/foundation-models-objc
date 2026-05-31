@@ -3,8 +3,8 @@ import FoundationModels
 
 /// Errors from serializing / restoring a transcript.
 enum AFMTranscriptError: Error, CustomNSError {
-    case encodingFailed
-    case invalidJSON
+    case encodingFailed(underlying: Error?)
+    case invalidJSON(underlying: Error?)
 
     static var errorDomain: String { "AFMTranscriptErrorDomain" }
 
@@ -17,11 +17,22 @@ enum AFMTranscriptError: Error, CustomNSError {
 
     var errorUserInfo: [String: Any] {
         let message: String
+        let underlying: Error?
         switch self {
-        case .encodingFailed: message = "The transcript could not be encoded to JSON."
-        case .invalidJSON: message = "The transcript JSON is not valid."
+        case .encodingFailed(let error):
+            message = "The transcript could not be encoded to JSON."
+            underlying = error
+        case .invalidJSON(let error):
+            message = "The transcript JSON is not valid."
+            underlying = error
         }
-        return [NSLocalizedDescriptionKey: message]
+        var info: [String: Any] = [NSLocalizedDescriptionKey: message]
+        // Preserve the originating Codable error (as the package does elsewhere via
+        // NSUnderlyingErrorKey) so callers can inspect the real cause.
+        if let underlying {
+            info[NSUnderlyingErrorKey] = underlying as NSError
+        }
+        return info
     }
 }
 
@@ -34,9 +45,16 @@ extension AFMLanguageModelSession {
     /// Mirrors `LanguageModelSession.transcript`, encoded as a JSON string. Throws an
     /// `NSError` in `AFMTranscriptErrorDomain` if encoding fails.
     @objc public func transcriptJSON() throws -> String {
-        let data = try JSONEncoder().encode(session.transcript)
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(session.transcript)
+        } catch {
+            // Surface the real `encode` failure in AFMTranscriptErrorDomain (as documented)
+            // rather than letting the raw EncodingError (NSCocoaErrorDomain) escape.
+            throw AFMTranscriptError.encodingFailed(underlying: error)
+        }
         guard let string = String(data: data, encoding: .utf8) else {
-            throw AFMTranscriptError.encodingFailed
+            throw AFMTranscriptError.encodingFailed(underlying: nil)
         }
         return string
     }
@@ -48,13 +66,13 @@ extension AFMLanguageModelSession {
     /// JSON.
     @objc public convenience init(transcriptJSON: String) throws {
         guard let data = transcriptJSON.data(using: .utf8) else {
-            throw AFMTranscriptError.invalidJSON
+            throw AFMTranscriptError.invalidJSON(underlying: nil)
         }
         let transcript: Transcript
         do {
             transcript = try JSONDecoder().decode(Transcript.self, from: data)
         } catch {
-            throw AFMTranscriptError.invalidJSON
+            throw AFMTranscriptError.invalidJSON(underlying: error)
         }
         self.init(session: LanguageModelSession(transcript: transcript))
     }

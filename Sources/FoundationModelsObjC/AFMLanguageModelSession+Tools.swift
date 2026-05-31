@@ -1,5 +1,6 @@
 import Foundation
 import FoundationModels
+import os
 
 /// A tool the model can call during generation, implemented by a non-Swift consumer.
 ///
@@ -8,6 +9,10 @@ import FoundationModels
 /// [completion] exactly once — with the tool's result as a string (fed back to the model)
 /// or an error. Because the call can arrive on any thread, implementations must be safe to
 /// invoke off the main actor.
+///
+/// A handler that never calls [completion] would otherwise stall the generation
+/// indefinitely; the bridge breaks that wait when the session is cancelled (see
+/// `AFMBridgedTool.call`), but the handler is still expected to fulfil the contract.
 @objc public protocol AFMToolHandler {
     func call(argumentsJSON: String, completion: @escaping (String?, Error?) -> Void)
 }
@@ -21,12 +26,24 @@ import FoundationModels
     @objc public let name: String
     @objc public let toolDescription: String
     @objc public let parametersJSONSchema: String
+    /// Whether the framework injects this tool's parameter schema into the model's
+    /// instructions. Set false when the schema is already described there (the tool-side
+    /// analogue of structured output's `includeSchemaInPrompt`), to avoid duplicating it
+    /// and spending context tokens.
+    @objc public let includesSchemaInInstructions: Bool
     @objc public let handler: AFMToolHandler
 
-    @objc public init(name: String, description: String, parametersJSONSchema: String, handler: AFMToolHandler) {
+    @objc public init(
+        name: String,
+        description: String,
+        parametersJSONSchema: String,
+        includesSchemaInInstructions: Bool,
+        handler: AFMToolHandler
+    ) {
         self.name = name
         self.toolDescription = description
         self.parametersJSONSchema = parametersJSONSchema
+        self.includesSchemaInInstructions = includesSchemaInInstructions
         self.handler = handler
         super.init()
     }
@@ -51,20 +68,52 @@ struct AFMBridgedTool: Tool, @unchecked Sendable {
     let name: String
     let description: String
     let parameters: GenerationSchema
+    let includesSchemaInInstructions: Bool
     let handler: AFMToolHandler
-
-    var includesSchemaInInstructions: Bool { true }
 
     func call(arguments: GeneratedContent) async throws -> String {
         let argumentsJSON = arguments.jsonString
-        return try await withCheckedThrowingContinuation { continuation in
-            handler.call(argumentsJSON: argumentsJSON) { result, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: result ?? "")
+        let handler = self.handler
+        // The handler's completion and task cancellation race for the continuation, and a
+        // checked continuation traps on a second resume — so the continuation lives in a
+        // locked slot and whoever arrives first takes it (clearing the slot) while the
+        // other becomes a no-op. Honoring cancellation also bounds the wait: a handler that
+        // never calls completion would otherwise hang the generation forever, but cancelling
+        // the session (cancel()/close()) now unsticks it. The lock holds a non-Sendable
+        // continuation, hence `uncheckedState`.
+        let slot = OSAllocatedUnfairLock<CheckedContinuation<String, Error>?>(uncheckedState: nil)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+                let cancelledBeforeStore = slot.withLock { stored -> Bool in
+                    // onCancel may have already fired (and found an empty slot) before we
+                    // stored; Task.isCancelled catches that so we don't park forever.
+                    if Task.isCancelled { return true }
+                    stored = continuation
+                    return false
+                }
+                if cancelledBeforeStore {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                handler.call(argumentsJSON: argumentsJSON) { result, error in
+                    let continuation = slot.withLock { stored -> CheckedContinuation<String, Error>? in
+                        defer { stored = nil }
+                        return stored
+                    }
+                    guard let continuation else { return }
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: result ?? "")
+                    }
                 }
             }
+        } onCancel: {
+            let continuation = slot.withLock { stored -> CheckedContinuation<String, Error>? in
+                defer { stored = nil }
+                return stored
+            }
+            continuation?.resume(throwing: CancellationError())
         }
     }
 }
@@ -83,6 +132,7 @@ extension AFMLanguageModelSession {
                 name: tool.name,
                 description: tool.toolDescription,
                 parameters: schema,
+                includesSchemaInInstructions: tool.includesSchemaInInstructions,
                 handler: tool.handler
             )
         }
