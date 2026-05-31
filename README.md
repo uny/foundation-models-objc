@@ -55,6 +55,7 @@ Types mirror the Swift-only originals with an `AFM` (**A**pple **F**oundation **
 | Member | Mirrors | Purpose |
 |:--|:--|:--|
 | `init(instructions: String?)` | `LanguageModelSession(instructions:)` | Start a session, optionally with system `Instructions`. |
+| `prewarm()` | `LanguageModelSession.prewarm()` | Preload the model to avoid first-generation cold-start latency. Best-effort, safe to call repeatedly. |
 | `respond(to:temperature:maxTokens:completion:)` | `respond(to:options:)` | Single-shot generation. A negative temperature / non-positive maxTokens means "use the model default". |
 | `streamResponse(to:temperature:maxTokens:onPartial:completion:)` | `streamResponse(to:options:)` | Streaming generation. `onPartial` receives **cumulative** snapshots (callers diff for deltas). |
 | `cancel()` | — | Cancel the in-flight generation (Foundation Models stops at the next token boundary). |

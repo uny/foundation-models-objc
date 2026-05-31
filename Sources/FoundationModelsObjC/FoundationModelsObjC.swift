@@ -81,6 +81,17 @@ import os
         super.init()
     }
 
+    /// Mirrors `LanguageModelSession.prewarm()` — loads the model into memory so the
+    /// next respond()/streamResponse() avoids the cold-start cost. Best-effort,
+    /// synchronous, no-op-safe, and safe to call repeatedly.
+    ///
+    /// It does not go through start(_:) (that machinery is only for cancellable
+    /// in-flight generations) and does not touch the in-flight State/lock, so it is
+    /// safe to call alongside or between generations.
+    @objc public func prewarm() {
+        session.prewarm()
+    }
+
     /// Mirrors `respond(to:options:)`. A negative [temperature] / non-positive
     /// [maxTokens] means "use the model default" (see [options]).
     @objc public func respond(
