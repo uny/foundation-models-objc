@@ -203,7 +203,9 @@ import os
         var generation: UInt64 = 0
     }
 
-    private let session: LanguageModelSession
+    // Internal (not private) so the structured-output / tools / transcript extensions in
+    // the companion files can reach the wrapped session.
+    let session: LanguageModelSession
 
     // State is written from the calling thread (respond/streamResponse) and read/cleared
     // from other threads via cancel()/close() and each task's own completion — a Kotlin
@@ -223,7 +225,7 @@ import os
     /// and must not run under an unfair lock. The task clears itself on completion, but
     /// only while it is still the current generation, so a replaced task can't clear a
     /// live one.
-    private func start(_ work: @escaping @Sendable () async -> Void) {
+    func start(_ work: @escaping @Sendable () async -> Void) {
         // Bind the shared lock to a local (its storage is shared across copies) so the
         // completion task captures `lock` by value instead of `self`.
         let lock = self.lock
@@ -240,23 +242,30 @@ import os
         previous?.cancel()
     }
 
+    /// Designated initializer wrapping an already-built `LanguageModelSession`. Every
+    /// public initializer — the `@objc` ones below and the structured-output / tools /
+    /// transcript ones in the companion files — funnels through here so the lock/Task
+    /// machinery is set up in exactly one place.
+    init(session: LanguageModelSession) {
+        self.session = session
+        super.init()
+    }
+
     /// Mirrors `LanguageModelSession(instructions:)`. A nil [instructions] starts a
     /// session without system `Instructions`.
-    @objc public init(instructions: String?) {
-        session = Self.makeSession(model: .default, instructions: instructions)
-        super.init()
+    @objc public convenience init(instructions: String?) {
+        self.init(session: Self.makeSession(model: .default, instructions: instructions))
     }
 
     /// Mirrors `LanguageModelSession(model:instructions:)` with a model built from a
     /// `SystemLanguageModel.UseCase` and guardrails. [permissiveGuardrails] selects
     /// `.permissiveContentTransformations` over the safe `.default`. A nil [instructions]
     /// starts the session without system `Instructions`.
-    @objc public init(useCase: AFMUseCase, permissiveGuardrails: Bool, instructions: String?) {
+    @objc public convenience init(useCase: AFMUseCase, permissiveGuardrails: Bool, instructions: String?) {
         let modelUseCase: SystemLanguageModel.UseCase = useCase == .contentTagging ? .contentTagging : .general
         let guardrails: SystemLanguageModel.Guardrails = permissiveGuardrails ? .permissiveContentTransformations : .default
         let model = SystemLanguageModel(useCase: modelUseCase, guardrails: guardrails)
-        session = Self.makeSession(model: model, instructions: instructions)
-        super.init()
+        self.init(session: Self.makeSession(model: model, instructions: instructions))
     }
 
     // Single construction path for both inits: only the model differs (the default model
@@ -406,7 +415,7 @@ import os
     // Maps framework errors to a stable NSError (AFMGenerationErrorCode) so Kotlin can
     // branch on the cause without reading Swift-only enum cases. The original error is
     // preserved under NSUnderlyingErrorKey and its message under NSLocalizedDescriptionKey.
-    private static func mapError(_ error: Error) -> NSError {
+    static func mapError(_ error: Error) -> NSError {
         let code: AFMGenerationErrorCode
         if error is CancellationError {
             code = .cancelled
